@@ -1,0 +1,7 @@
+{
+  "name": "Lumina - AI Video Knowledge Bot",
+  "description": "A premium, glassmorphic dashboard for analyzing YouTube videos with AI. Features real-time chat, video summarization, and a sleek dark-mode UI.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

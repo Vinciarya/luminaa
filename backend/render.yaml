@@ -1,0 +1,27 @@
+services:
+  # Backend Service
+  - type: web
+    name: luminaa-backend
+    env: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: GEMINI_API_KEY_1
+        sync: false
+      - key: FIREBASE_CREDENTIALS
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: luminaa-redis
+          property: connectionString
+      - key: FRONTEND_URL
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+
+  # Redis Service
+  - type: redis
+    name: luminaa-redis
+    ipAllowList: [] # Access only from internal services
+    plan: free # Optional, defaults to free on starter

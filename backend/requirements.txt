@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+youtube-transcript-api==0.6.2
+google-generativeai
+redis
+python-dotenv
+httpx
+python-multipart
+slowapi
+firebase-admin
+pydantic-settings
+pydantic>=2.0.0
