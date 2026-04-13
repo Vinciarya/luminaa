@@ -44,8 +44,7 @@ See [SETUP.md](SETUP.md) for detailed instructions.
 ```bash
 # Backend
 cd backend
-python -m venv venv
-venv\Scripts\activate  # Windows
+  # Windows
 # OR
 source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
@@ -296,3 +295,5 @@ MIT
 **Built with**: FastAPI, React, TypeScript, Gemini AI, Redis, Vite
 
 **Cost Target**: $0-10/month for 1000+ videos ✅
+python -m venv venv
+venv\Scripts\activate

@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 
 from models import VideoAnalyzeRequest, VideoAnalyzeResponse, ErrorResponse, DetailedNote
-from services.transcript_service import extract_video_id, get_transcript, format_transcript_for_ai
+from services.transcript_service import extract_video_id, get_transcript, format_transcript_for_ai, get_video_duration
 from services.gemini_service import gemini_service
 from services.gemini_service import gemini_service
 from services.cache_service import cache_service
@@ -73,82 +73,51 @@ async def analyze_video(request: Request, body: VideoAnalyzeRequest, user: dict 
     print(f"{'='*60}")
     
     # Step 2: Check cache first (COST OPTIMIZATION)
-    # Only check cache if user is logged in (Guests always get a fresh slice or we cache slices separately?)
-    # For now, let's say guests don't trigger the main cache, or we cache their slice separately?
-    # Simpler: If guest, bypass cache for now or cache with a different key suffix?
-    # Let's just bypass cache read for guests to ensure they get the preview, OR check if we have a full cache.
-    # If we have full cache, we can slice it and return it? Yes.
-    
     cached_summary = await cache_service.get_video_summary(video_id)
     if cached_summary:
-        print(f"✅ Returning cached result (saved $0.002)")
-        
-        # If guest, slice the cached result
-        if not user:
-            # Slice summary and notes? 
-            # Actually, the cached summary is already full. 
-            # We can't easily "un-summarize" it. 
-            # So for guests, maybe we just show the cached summary but with a flag?
-            # User wants "process only 30%".
-            # If we return full summary, they see full video.
-            # So we SHOULD process only 30% for them.
-            # If we have full cache, we can't really use it unless we stored the transcript.
-            # But we do retain the video_id.
-            
-            # Re-processing 30% might incur cost/time.
-            # BUT, the prompt said "process only half".
-            
-            # Let's stick to the plan: Guests get 30% processing.
-            # So if guest, we proceed to process 30%, ignoring full cache?
-            # OR we check if we have a "preview" cache?
-            # Let's ignore cache for guests for simplicity of implementation now.
-            pass 
-        else:
-            return VideoAnalyzeResponse(
-                video_id=video_id,
-                url=body.url,
-                thumbnail=f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
-                cached=True,
-                **cached_summary
-            )
-    
-    # Step 3: Cache miss (or Guest) - process video
+        print(f"✅ Returning cached result (saved API cost)")
+        return VideoAnalyzeResponse(
+            video_id=video_id,
+            url=body.url,
+            thumbnail=f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+            cached=True,
+            is_guest_preview=False,
+            **cached_summary
+        )
+
+    # Step 3: Cache miss - process video
+
     print(f"❌ Cache miss (or Guest) - processing video...")
     
     try:
         # Step 3a: Get transcript (FREE - no API key needed!)
         print(f"📝 Fetching transcript (FREE)...")
         transcript_data = get_transcript(video_id)
-        
-        is_guest_preview = False
-        
-        # GUEST LOGIC: Slice Transcript
-        if not user:
-            total_len = len(transcript_data)
-            slice_len = int(total_len * 0.30)
-            if slice_len < 1: slice_len = 1
-            transcript_data = transcript_data[:slice_len]
-            print(f"✂️ Sliced transcript to {slice_len} segments (30%)")
-            is_guest_preview = True
-            
+
+        # Calculate full video duration
+        full_duration_seconds = get_video_duration(transcript_data)
+        full_duration_minutes = round(full_duration_seconds / 60, 1)
+
         formatted_transcript = format_transcript_for_ai(transcript_data)
-        
-        print(f"✅ Transcript fetched: {len(transcript_data)} segments, {len(formatted_transcript)} chars")
-        
-        # Cache transcript for future use (30 days) - ONLY IF FULL
-        if user:
-            await cache_service.set_transcript(video_id, formatted_transcript, ttl_days=30)
-        
+        duration_seconds = get_video_duration(transcript_data)
+        duration_minutes = duration_seconds / 60
+
+        print(f"✅ Transcript fetched: {len(transcript_data)} segments, {len(formatted_transcript)} chars, {duration_minutes:.1f} min")
+
+        # Cache transcript for future use (30 days)
+        await cache_service.set_transcript(video_id, formatted_transcript, ttl_days=30)
+
         # Step 3b: Summarize with Gemini (FREE tier with rate limiting)
         print(f"🤖 Summarizing with Gemini Flash (FREE tier)...")
         summary_data = await gemini_service.summarize_transcript(
             transcript=formatted_transcript,
-            video_id=video_id
+            video_id=video_id,
+            duration_seconds=duration_seconds
         )
-        
+
         print(f"✅ Summary generated: {summary_data['title']}")
-        
-        # Step 3c: Cache summary (90 days) - ONLY IF FULL
+
+        # Step 3c: Cache summary (90 days) - for everyone
         cache_data = {
             "title": summary_data["title"],
             "executiveSummary": summary_data["executiveSummary"],
@@ -157,19 +126,20 @@ async def analyze_video(request: Request, body: VideoAnalyzeRequest, user: dict 
             "detailedNotes": summary_data["detailedNotes"],
             "dateAdded": "Just now"
         }
-        
-        if user:
-            await cache_service.set_video_summary(video_id, cache_data, ttl_days=90)
-            print(f"💾 Cached for 90 days")
-        
+
+        await cache_service.set_video_summary(video_id, cache_data, ttl_days=90)
+        print(f"💾 Cached for 90 days")
+
         print(f"{'='*60}\n")
-        
+
         return VideoAnalyzeResponse(
             video_id=video_id,
             url=body.url,
             thumbnail=f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
             cached=False,
-            is_guest_preview=is_guest_preview,
+            is_guest_preview=False,
+            preview_duration_minutes=None,
+            full_duration_minutes=full_duration_minutes,
             **cache_data
         )
     

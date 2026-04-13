@@ -35,6 +35,8 @@ class VideoAnalyzeResponse(BaseModel):
     processed: bool = True
     cached: bool = Field(..., description="Whether result was from cache")
     is_guest_preview: bool = False
+    preview_duration_minutes: Optional[float] = Field(None, description="Minutes of video covered in this preview (guests only)")
+    full_duration_minutes: Optional[float] = Field(None, description="Total video duration in minutes")
     
     class Config:
         json_schema_extra = {

@@ -5,6 +5,7 @@ Uses youtube-transcript-api (no API key needed, no rate limits)
 
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import re
+import html
 from typing import List, Dict, Optional
 
 def extract_video_id(url: str) -> Optional[str]:
@@ -35,120 +36,150 @@ def extract_video_id(url: str) -> Optional[str]:
 def get_transcript(video_id: str, languages: List[str] = ['en'], max_retries: int = 3) -> List[Dict]:
     """
     Get transcript with timestamps (100% FREE)
-    Supports all languages with English translation fallback
+    Supports all languages with English translation fallback.
+    Compatible with youtube-transcript-api >= 1.0.0.
     """
     print(f"DEBUG: get_transcript called for {video_id}")
     import time
-    
+
+    ytt = YouTubeTranscriptApi()  # v1.0+ requires instantiation
+
     for attempt in range(max_retries):
         try:
             # Step 1: List all available transcripts
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Step 2: Try to find a manual or generated transcript in the requested languages
+            transcript_list = ytt.list(video_id)
+
+            # Step 2: Try the requested languages first
+            transcript = None
             try:
-                # find_transcript prefers manually created transcripts over generated ones
                 transcript = transcript_list.find_transcript(languages)
-            except:
-                # Step 3: Fallback - find ANY available transcript and translate it to English
-                # If 'en' was requested but not found, this catches it
-                try:
-                    # Find any manual or generated transcript
-                    # find_transcript without args might not work as expected, 
-                    # so we iterate through the available ones
-                    available = list(transcript_list._manually_created_transcripts.values()) + \
-                               list(transcript_list._generated_transcripts.values())
-                    
-                    if not available:
-                        raise Exception("No transcripts available")
-                    
-                    # Preferred: Use the first one and translate to English
-                    source_transcript = available[0]
-                    if 'en' in languages:
-                         transcript = source_transcript.translate('en')
-                         print(f"DEBUG: Translated {source_transcript.language_code} to English")
-                    else:
-                         transcript = source_transcript
-                except Exception as translate_err:
-                    print(f"DEBUG: Translation failed: {translate_err}")
-                    # If translation fails, try to just fetch the first one available
-                    transcript = transcript_list.find_transcript([]) # find_transcript([]) often works as "any"
-            
+            except NoTranscriptFound:
+                pass
+
+            # Step 3: Fallback — iterate the transcript list (v1.0+ public API)
+            if transcript is None:
+                available = list(transcript_list)   # TranscriptList is directly iterable in v1.0+
+                if not available:
+                    raise Exception("No transcripts available for this video")
+
+                source_transcript = available[0]
+                if 'en' in languages and source_transcript.language_code != 'en':
+                    try:
+                        transcript = source_transcript.translate('en')
+                        print(f"DEBUG: Translated {source_transcript.language_code} to English")
+                    except Exception as translate_err:
+                        print(f"DEBUG: Translation failed ({translate_err}), using original language")
+                        transcript = source_transcript
+                else:
+                    transcript = source_transcript
+
             # Step 4: Fetch the content
             fetched_data = transcript.fetch()
-            
-            # youtube-transcript-api v1.0+ returns a FetchedTranscript object (not a list of dicts).
-            # Use .to_raw_data() if available, otherwise fall back to attribute access.
+
+            # v1.0+ returns a FetchedTranscript object; .to_raw_data() gives list of dicts.
+            # Older versions already returned a list of dicts directly.
             if hasattr(fetched_data, 'to_raw_data'):
                 raw_segments = fetched_data.to_raw_data()
             else:
-                raw_segments = fetched_data  # older versions already return a list of dicts
-            
-            # Convert transcript segments (supports both dict and object-style segments)
+                raw_segments = fetched_data
+
+            # Normalise segments — handles both dict and FetchedTranscriptSnippet objects
             result = []
             for segment in raw_segments:
                 if isinstance(segment, dict):
                     result.append({
-                        'text': segment['text'],
+                        'text': html.unescape(segment['text']).strip(),
                         'start': segment['start'],
-                        'duration': segment['duration']
+                        'duration': segment['duration'],
                     })
                 else:
-                    # FetchedTranscriptSnippet object (v1.0+)
                     result.append({
-                        'text': segment.text,
+                        'text': html.unescape(segment.text).strip(),
                         'start': segment.start,
-                        'duration': segment.duration
+                        'duration': segment.duration,
                     })
-            
+
+            # Remove empty segments
+            result = [s for s in result if s['text']]
             return result
-        
+
         except TranscriptsDisabled:
             raise Exception(f"Transcripts are disabled for video {video_id}")
         except NoTranscriptFound:
             raise Exception(f"No transcript found for video {video_id}")
         except Exception as e:
             error_str = str(e).lower()
-            print(f"DEBUG: fetch_transcript error on attempt {attempt+1}: {type(e).__name__}: {e}")
-            
-            # Don't retry on permanent errors
+            print(f"DEBUG: fetch_transcript error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+
+            # Don't retry on permanent / unrecoverable errors
             if any(x in error_str for x in ["disabled", "not found", "private", "no transcripts available"]):
                 raise Exception(f"Error fetching transcript: {str(e)}")
-            
+
             if attempt < max_retries - 1:
-                # Wait before retrying (exponential backoff)
-                wait_time = 2 ** attempt
-                print(f"⚠️  Transcript fetch attempt {attempt + 1} failed, retrying in {wait_time}s...")
+                wait_time = 2 ** attempt  # exponential back-off: 1s, 2s
+                print(f"WARNING: Transcript fetch attempt {attempt + 1} failed, retrying in {wait_time}s...")
                 time.sleep(wait_time)
             else:
-                # Re-raise with full context so the router can show the real error
                 raise Exception(f"Error fetching transcript ({type(e).__name__}): {str(e)}")
 
-def format_transcript_for_ai(transcript: List[Dict], max_length: int = 50000) -> str:
+def format_transcript_for_ai(transcript: List[Dict], max_length: int = 200000) -> str:
     """
-    Format transcript for AI summarization
-    
+    Format transcript for AI summarization.
+
+    Segments are grouped into ~30-second blocks to reduce line count while
+    preserving every word — this dramatically cuts token usage without losing
+    any content.
+
     Args:
         transcript: Raw transcript from YouTubeTranscriptApi
-        max_length: Maximum character length (default: 50k chars)
-    
+        max_length: Maximum character length (default: 200k — covers ~25 min videos)
+
     Returns:
         Formatted transcript string with timestamps
     """
+    if not transcript:
+        return ""
+
     formatted_parts = []
-    
+    block_start = transcript[0]['start']
+    block_texts = []
+    BLOCK_SECONDS = 30  # group into 30-second blocks
+
     for segment in transcript:
-        timestamp = format_timestamp(segment['start'])
-        text = segment['text'].strip()
-        formatted_parts.append(f"[{timestamp}] {text}")
-    
+        if segment['start'] - block_start >= BLOCK_SECONDS and block_texts:
+            timestamp = format_timestamp(block_start)
+            formatted_parts.append(f"[{timestamp}] {' '.join(block_texts)}")
+            block_start = segment['start']
+            block_texts = []
+        block_texts.append(segment['text'])
+
+    # Flush the final block
+    if block_texts:
+        timestamp = format_timestamp(block_start)
+        formatted_parts.append(f"[{timestamp}] {' '.join(block_texts)}")
+
     full_text = "\n".join(formatted_parts)
-    
-    # Truncate if too long (to save on token costs)
+
+    # Hard safety cap — should almost never trigger now
     if len(full_text) > max_length:
-        full_text = full_text[:max_length] + "\n\n[Transcript truncated for length...]"
-    
+        # Try to cut at a newline boundary so timestamps stay intact
+        cut_pos = full_text.rfind("\n", 0, max_length)
+        if cut_pos == -1:
+            cut_pos = max_length
+        full_text = full_text[:cut_pos] + "\n\n[Transcript continues beyond AI context limit...]"
+
     return full_text
+
+
+def get_video_duration(transcript: List[Dict]) -> float:
+    """
+    Return total video duration in seconds from transcript data.
+    Uses the last segment's start + duration.
+    """
+    if not transcript:
+        return 0.0
+    last = transcript[-1]
+    return last['start'] + last.get('duration', 0)
 
 def format_timestamp(seconds: float) -> str:
     """

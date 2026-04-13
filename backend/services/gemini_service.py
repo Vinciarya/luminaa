@@ -14,6 +14,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import asyncio
 import json
+import math
 from config import settings
 
 class GeminiRateLimiter:
@@ -127,15 +128,33 @@ class GeminiService:
         self.api_keys = settings.gemini_api_keys
         self.rate_limiter = GeminiRateLimiter(self.api_keys)
         
-        # Configure all API keys
+        # Configure models — one per key, with generous output limits
         self.models = []
         for key in self.api_keys:
             genai.configure(api_key=key)
-            # Use gemini-2.5-flash (latest available model)
-            self.models.append(genai.GenerativeModel('gemini-1.5-flash'))
+            self.models.append(
+                genai.GenerativeModel(
+                    'gemini-flash-latest',
+                    generation_config=genai.GenerationConfig(
+                        max_output_tokens=8192,
+                        temperature=0.2,
+                    )
+                )
+            )
         
         print(f"✅ Gemini service initialized with {len(self.api_keys)} API keys")
         print(f"📊 Total capacity: {len(self.api_keys) * 15} RPM, {len(self.api_keys) * 1500} RPD")
+    
+    def _make_model(self, api_key: str) -> genai.GenerativeModel:
+        """Create a model instance with a specific API key and generous output limit."""
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel(
+            'gemini-flash-latest',
+            generation_config=genai.GenerationConfig(
+                max_output_tokens=8192,
+                temperature=0.2,
+            )
+        )
     
     async def _generate_with_retry(
         self, 
@@ -194,16 +213,22 @@ class GeminiService:
         self, 
         transcript: str, 
         video_id: str,
-        video_title: Optional[str] = None
+        video_title: Optional[str] = None,
+        duration_seconds: float = 0.0
     ) -> Dict[str, Any]:
         """
-        Summarize video transcript using Gemini Flash (FREE)
-        
+        Summarize video transcript using Gemini Flash.
+
+        For videos longer than ~15 minutes the transcript is split into chunks
+        which are summarized individually and then merged, ensuring the full
+        video is always covered.
+
         Args:
-            transcript: Formatted transcript with timestamps
+            transcript: Formatted transcript with [MM:SS] timestamps
             video_id: YouTube video ID
             video_title: Optional video title
-        
+            duration_seconds: Total video length (used to scale note count)
+
         Returns:
             {
                 "title": str,
@@ -212,12 +237,39 @@ class GeminiService:
                 "detailedNotes": List[{timestamp, topic, content}]
             }
         """
-        
+        duration_minutes = duration_seconds / 60.0 if duration_seconds else 0
+
+        # Dynamically scale: aim for ~1-2 notes per minute
+        if duration_minutes >= 30:
+            target_notes = "25-40"
+        elif duration_minutes >= 20:
+            target_notes = "20-30"
+        elif duration_minutes >= 10:
+            target_notes = "12-20"
+        elif duration_minutes >= 5:
+            target_notes = "8-12"
+        else:
+            target_notes = "5-10"
+
+        duration_hint = (
+            f"VIDEO DURATION: approximately {int(duration_minutes)} minutes" 
+            if duration_minutes > 0 
+            else ""
+        )
+
+        # For very long transcripts, split into chunks of ~80k chars and merge
+        CHUNK_SIZE = 80000
+        if len(transcript) > CHUNK_SIZE:
+            return await self._summarize_chunked(
+                transcript, video_id, video_title, duration_seconds, target_notes
+            )
+
         prompt = f"""
 You are an advanced video content analyzer. Analyze this COMPLETE YouTube video transcript and create a comprehensive study guide.
 
 VIDEO ID: {video_id}
 {f"VIDEO TITLE: {video_title}" if video_title else ""}
+{duration_hint}
 
 TRANSCRIPT:
 {transcript}
@@ -226,52 +278,170 @@ Generate a structured study guide in JSON format with the following structure:
 
 {{
   "title": "Video Title (extract from content or use provided title)",
-  "executiveSummary": "Concise 3-5 sentence summary of the main points",
+  "executiveSummary": "Concise 4-6 sentence summary covering the ENTIRE video from start to finish",
   "keyTerms": ["Term 1", "Term 2", "Term 3", ...],
   "detailedNotes": [
     {{
-      "timestamp": "MM:SS (from transcript)",
+      "timestamp": "MM:SS or HH:MM:SS (use exact timestamps from transcript)",
       "topic": "Section Topic",
-      "content": "Detailed explanation of this section"
+      "content": "Detailed explanation of this section (2-4 sentences)"
     }}
   ]
 }}
 
 CRITICAL REQUIREMENTS:
-- Extract timestamps from the transcript markers [MM:SS] or [HH:MM:SS]
-- Create detailed notes covering the ENTIRE video from START to END
-- Include notes for ALL major sections and topics throughout the video
-- Ensure the last note's timestamp is close to the end of the video
-- Create 8-15 detailed notes depending on video length and content density
-- Key terms should be important concepts, not common words
-- Executive summary should cover the complete video content
-- Return ONLY valid JSON, no markdown formatting
+- COVER THE ENTIRE VIDEO — first note near 00:00, last note near the end of the video
+- Extract timestamps from [MM:SS] or [HH:MM:SS] markers in the transcript exactly
+- Create {target_notes} detailed notes spread evenly across the full duration
+- Every major topic change, concept, or section must have its own note
+- Key terms should be domain-specific concepts, not generic words
+- Executive summary must cover the complete arc of the video, not just the beginning
+- Return ONLY valid JSON, no markdown formatting, no code fences
 """
         
         try:
             response_text = await self._generate_with_retry(prompt)
-            
-            # Extract JSON from response
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
-            
-            if json_start == -1 or json_end == 0:
-                raise Exception("No valid JSON found in response")
-            
-            json_text = response_text[json_start:json_end]
-            data = json.loads(json_text)
-            
-            return {
-                "title": data.get("title", f"Video {video_id}"),
-                "executiveSummary": data.get("executiveSummary", ""),
-                "keyTerms": data.get("keyTerms", []),
-                "detailedNotes": data.get("detailedNotes", []),
-                "summary": data.get("executiveSummary", "")  # Alias for compatibility
-            }
+            return self._parse_summary_json(response_text, video_id)
         
         except Exception as e:
             print(f"❌ Summarization error: {e}")
             raise Exception(f"Failed to summarize video: {str(e)}")
+
+    async def _summarize_chunked(
+        self,
+        transcript: str,
+        video_id: str,
+        video_title: Optional[str],
+        duration_seconds: float,
+        target_notes: str,
+    ) -> Dict[str, Any]:
+        """
+        Handle very long transcripts (>15 min) by splitting into chunks,
+        summarizing each, then merging into a final result.
+        """
+        CHUNK_SIZE = 80000
+        lines = transcript.split("\n")
+
+        # Build chunks that respect line boundaries
+        chunks: List[str] = []
+        current_chunk: List[str] = []
+        current_len = 0
+        for line in lines:
+            if current_len + len(line) > CHUNK_SIZE and current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = [line]
+                current_len = len(line)
+            else:
+                current_chunk.append(line)
+                current_len += len(line)
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+
+        print(f"📦 Transcript split into {len(chunks)} chunks for processing")
+
+        all_notes: List[Dict] = []
+        all_key_terms: List[str] = []
+        partial_summaries: List[str] = []
+        title = f"Video {video_id}"
+
+        for i, chunk in enumerate(chunks):
+            chunk_prompt = f"""
+Analyze this SECTION ({i+1}/{len(chunks)}) of a YouTube video transcript.
+{f"VIDEO TITLE: {video_title}" if video_title else ""}
+
+TRANSCRIPT SECTION:
+{chunk}
+
+Return JSON:
+{{
+  "title": "video title if identifiable",
+  "sectionSummary": "2-3 sentence summary of this section",
+  "keyTerms": ["term1", "term2"],
+  "notes": [
+    {{"timestamp": "MM:SS", "topic": "Topic", "content": "2-3 sentence explanation"}}
+  ]
+}}
+
+REQUIREMENTS:
+- Cover ALL content in this section with notes (aim for one note per major topic)
+- Use exact [MM:SS] timestamps from the transcript
+- Return ONLY valid JSON, no markdown
+"""
+            try:
+                resp = await self._generate_with_retry(chunk_prompt)
+                chunk_data = self._parse_raw_json(resp)
+                if chunk_data.get("title") and chunk_data["title"] != f"Video {video_id}":
+                    title = chunk_data["title"]
+                partial_summaries.append(chunk_data.get("sectionSummary", ""))
+                all_key_terms.extend(chunk_data.get("keyTerms", []))
+                all_notes.extend(chunk_data.get("notes", []))
+            except Exception as e:
+                print(f"⚠️ Chunk {i+1} error: {e}")
+
+        # De-duplicate key terms
+        seen = set()
+        unique_terms = []
+        for t in all_key_terms:
+            tl = t.lower()
+            if tl not in seen:
+                seen.add(tl)
+                unique_terms.append(t)
+
+        # Merge partial summaries into a final executive summary
+        merge_prompt = f"""
+You analyzed a video in {len(chunks)} sections. Here are the section summaries:
+{chr(10).join(f'{i+1}. {s}' for i, s in enumerate(partial_summaries))}
+
+Write a single cohesive 4-6 sentence executive summary covering the ENTIRE video.
+Return ONLY the plain text summary, nothing else.
+"""
+        try:
+            exec_summary = await self._generate_with_retry(merge_prompt)
+            exec_summary = exec_summary.strip()
+        except Exception:
+            exec_summary = " ".join(partial_summaries)
+
+        # Sort notes by timestamp
+        def ts_to_seconds(ts: str) -> float:
+            parts = ts.replace("[", "").replace("]", "").split(":")
+            try:
+                if len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                elif len(parts) == 2:
+                    return int(parts[0]) * 60 + float(parts[1])
+            except Exception:
+                pass
+            return 0.0
+
+        all_notes.sort(key=lambda n: ts_to_seconds(n.get("timestamp", "0:00")))
+
+        return {
+            "title": title,
+            "executiveSummary": exec_summary,
+            "keyTerms": unique_terms[:30],
+            "detailedNotes": all_notes,
+            "summary": exec_summary,
+        }
+
+    def _parse_raw_json(self, text: str) -> Dict[str, Any]:
+        """Extract and parse JSON from a raw LLM response."""
+        json_start = text.find('{')
+        json_end = text.rfind('}') + 1
+        if json_start == -1 or json_end == 0:
+            raise ValueError("No JSON found in LLM response")
+        return json.loads(text[json_start:json_end])
+
+    def _parse_summary_json(self, response_text: str, video_id: str) -> Dict[str, Any]:
+        """Parse and normalise a summarize_transcript LLM response."""
+        data = self._parse_raw_json(response_text)
+        exec_summary = data.get("executiveSummary", "")
+        return {
+            "title": data.get("title", f"Video {video_id}"),
+            "executiveSummary": exec_summary,
+            "keyTerms": data.get("keyTerms", []),
+            "detailedNotes": data.get("detailedNotes", []),
+            "summary": exec_summary,
+        }
     
     async def create_chat_context(
         self, 

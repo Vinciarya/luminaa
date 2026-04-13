@@ -9,16 +9,26 @@ security = HTTPBearer(auto_error=False)
 
 def verify_firebase_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
-    Verify Firebase ID token
+    Verify Firebase ID token.
+    Raises 401 if no token is provided or if the token is invalid.
     """
+    # credentials is None when no Authorization header is sent
+    # (HTTPBearer auto_error=False suppresses the automatic error)
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
-    
+
     try:
         # Verify token with Firebase Admin
         decoded_token = auth.verify_id_token(token)
         return decoded_token
-        
-    except ValueError as e:
+
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
@@ -37,7 +47,7 @@ def verify_firebase_token(credentials: HTTPAuthorizationCredentials = Depends(se
             headers={"WWW-Authenticate": "Bearer"},
         )
     except Exception as e:
-        print(f"❌ Auth Error: {e}")
+        print(f"Auth Error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed",

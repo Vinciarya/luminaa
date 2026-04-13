@@ -19,7 +19,7 @@ from models import (
 from services.gemini_service import gemini_service
 from services.cache_service import cache_service
 from limiter import limiter
-from auth import get_current_user
+from auth import get_optional_current_user
 from fastapi import Request, Depends
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 )
 @limiter.limit("10/minute")
-async def create_chat_session(request: Request, body: ChatCreateRequest, user: dict = Depends(get_current_user)):
+async def create_chat_session(request: Request, body: ChatCreateRequest, user: dict = Depends(get_optional_current_user)):
     """
     Create chat session with video context
     
@@ -88,7 +88,7 @@ async def create_chat_session(request: Request, body: ChatCreateRequest, user: d
 
 )
 @limiter.limit("20/minute")
-async def send_chat_message(request: Request, body: ChatMessageRequest, user: dict = Depends(get_current_user)):
+async def send_chat_message(request: Request, body: ChatMessageRequest, user: dict = Depends(get_optional_current_user)):
     """
     Send message to chat session
     
