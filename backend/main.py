@@ -26,7 +26,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
+limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_storage_url)
 
 # ==================== LIFESPAN EVENTS ====================
 
@@ -94,13 +94,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS - Allow frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_url,
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -136,13 +130,19 @@ async def global_exception_handler(request: Request, exc: Exception):
     """
     print(f"❌ Unhandled error: {exc}")
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "Internal server error",
             "detail": str(exc) if settings.environment == "development" else "An error occurred"
         }
     )
+    
+    # Manually add CORS for error responses
+    response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 # ==================== ROUTES ====================
 

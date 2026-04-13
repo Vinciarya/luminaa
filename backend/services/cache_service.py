@@ -23,22 +23,13 @@ class CacheService:
     async def connect(self):
         """Connect to Redis (Upstash or local)"""
         try:
-            # Check if using Upstash (requires SSL)
-            if "upstash.io" in settings.redis_url:
-                # Upstash requires SSL - use rediss:// protocol
-                redis_url = settings.redis_url.replace("redis://", "rediss://")
-                self.redis_client = await redis.from_url(
-                    redis_url,
-                    encoding="utf-8",
-                    decode_responses=True
-                )
-            else:
-                # Local Redis without SSL
-                self.redis_client = await redis.from_url(
-                    settings.redis_url,
-                    encoding="utf-8",
-                    decode_responses=True
-                )
+            # The protocol (redis:// vs rediss://) is now handled in settings.redis_storage_url
+            self.redis_client = await redis.from_url(
+                settings.redis_storage_url,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=30
+            )
             
             # Test connection
             await self.redis_client.ping()

@@ -178,22 +178,28 @@ async def analyze_video(request: Request, body: VideoAnalyzeRequest, user: dict 
         print(f"❌ Error: {error_msg}")
         
         # Provide helpful error messages
-        if "no element found" in error_msg.lower() or "xml" in error_msg.lower():
+        error_lower = error_msg.lower()
+        if "no element found" in error_lower or "xml" in error_lower or "typeerror" in error_lower or "not subscriptable" in error_lower:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This video is not available or has restricted access. It may be private, age-restricted, or region-locked. Please try a different video."
+                detail="Failed to fetch transcript. The video may be private, age-restricted, or region-locked. Please try a different video."
             )
-        elif "Transcripts are disabled" in error_msg:
+        elif "transcripts are disabled" in error_lower:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="This video has no captions/subtitles available. Please try a different video."
             )
-        elif "No transcript found" in error_msg:
+        elif "no transcript found" in error_lower:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No English transcript found for this video. It may be in a different language."
+                detail="No transcript or captions found for this video. It may not have any subtitles available."
             )
-        elif "rate limit" in error_msg.lower():
+        elif "no transcripts available" in error_lower:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No transcripts are available for this video."
+            )
+        elif "rate limit" in error_lower:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit exceeded. Please try again in a few seconds."

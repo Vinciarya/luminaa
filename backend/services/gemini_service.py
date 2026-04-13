@@ -132,7 +132,7 @@ class GeminiService:
         for key in self.api_keys:
             genai.configure(api_key=key)
             # Use gemini-2.5-flash (latest available model)
-            self.models.append(genai.GenerativeModel('gemini-2.5-flash'))
+            self.models.append(genai.GenerativeModel('gemini-1.5-flash'))
         
         print(f"✅ Gemini service initialized with {len(self.api_keys)} API keys")
         print(f"📊 Total capacity: {len(self.api_keys) * 15} RPM, {len(self.api_keys) * 1500} RPD")

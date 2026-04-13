@@ -1,5 +1,8 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
+
+BASE_DIR = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     # Gemini API Keys (for rotation)
@@ -29,7 +32,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=BASE_DIR / ".env",
         case_sensitive=False
     )
     
@@ -42,5 +45,10 @@ class Settings(BaseSettings):
         if self.gemini_api_key_3:
             keys.append(self.gemini_api_key_3)
         return keys
+
+    @property
+    def redis_storage_url(self) -> str:
+        """Alias for redis_url to support limiter.py"""
+        return self.redis_url
 
 settings = Settings()
